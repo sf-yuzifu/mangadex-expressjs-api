@@ -90,31 +90,11 @@ app.get("/config", (req, res) => {
 const searchCache = new Map()
 const CACHE_TTL = 30000 // 30秒
 
-function parseAcceptLanguage(language) {
-  // 简单解析：取第一个语言标签
-  const lang = language.split(",")[0].split(";")[0].trim().toLowerCase()
-
-  // 映射到 MangaDex 支持的语言代码
-  const langMap = {
-    "zh-cn": "zh",
-    "zh-tw": "zh-hk",
-    ja: "ja-ro",
-    en: "en",
-    ko: "ko"
-  }
-  return langMap[lang] || "en"
-}
-
-function getPreferredTitle(titleObj, language = "en") {
+function getPreferredTitle(titleObj) {
   if (!titleObj || typeof titleObj !== "object") {
     return "untitled"
   }
 
-  console.log(language, titleObj)
-
-  if (titleObj[language]) {
-    return titleObj[language]
-  }
   if (titleObj.en) {
     // 优先级：en -> ja-ro -> 第一个可用的标题
     return titleObj.en
@@ -175,10 +155,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     // 处理当前页漫画的封面
     const results = await Promise.all(
       currentPageResults.map(async (manga) => {
-        const preferredTitle = getPreferredTitle(
-          manga.title,
-          parseAcceptLanguage(req.get("Accept-Language") || "en")
-        )
+        const preferredTitle = getPreferredTitle(manga.title)
         await manga.mainCover.resolve()
 
         let coverImageUrl
