@@ -75,7 +75,7 @@ app.get("/config", (req, res) => {
   const config = {
     MangaDex: {
       name: "MangaDex",
-      apiUrl: "https://mangadex.yzf.moe",
+      apiUrl: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`,
       detailPath: "/comic/<id>",
       photoPath: "/photo/<id>",
       searchPath: "/search/<text>/<page>",
@@ -174,7 +174,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
         return {
           comic_id: manga.id,
           title: preferredTitle,
-          cover_url: `https://mangadex.yzf.moe/image/proxy?url=${coverImageUrl}&width=100`
+          cover_url: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverImageUrl}&width=100`
         }
       })
     )
@@ -286,7 +286,7 @@ app.get("/comic/:id", async (req, res) => {
       name: getPreferredTitle(manga.title), // 漫画名称
       page_count: estimatedPageCount, // 漫画页数
       rate: parseFloat(statistics.rating.bayesian.toFixed(2)), // 漫画评分
-      cover: `https://mangadex.yzf.moe/image/proxy?url=${coverUrl}&width=256`, // 漫画封面
+      cover: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverUrl}&width=256`, // 漫画封面
       tags: manga.tags ? manga.tags.map((tag) => tag.name.en) : "" // 漫画标签
     }
 
@@ -334,7 +334,7 @@ app.get("/photo/:id", async (req, res) => {
 
     // 2. 获取第一章
     const chapters = await manga.getFeed({
-      translatedLanguage: ["en", "zh", "zh-hk"],
+      translatedLanguage: ["en"],
       order: { chapter: "asc" },
       limit: 1,
       contentRating: ["safe", "suggestive", "erotica", "pornographic"]
@@ -353,7 +353,7 @@ app.get("/photo/:id", async (req, res) => {
 
     // 4. 构建图片URL数组
     const images = readablePages.map((url) => ({
-      url: `https://mangadex.yzf.moe/image/proxy?url=${url}`
+      url: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${url}`
     }))
 
     // 5. 返回响应
