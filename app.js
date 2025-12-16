@@ -77,7 +77,7 @@ app.get("/config", (req, res) => {
       name: "MangaDex",
       apiUrl: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`,
       detailPath: "/comic/<id>",
-      photoPath: "/photo/<id>",
+      photoPath: "/photo/<id>/ch/<chapter>",
       searchPath: "/search/<text>/<page>",
       type: "mangedex"
     }
@@ -272,22 +272,30 @@ app.get("/comic/:id", async (req, res) => {
         .getFeed({
           translatedLanguage: ["en"],
           order: { chapter: "asc" },
-          limit: 1,
+          limit: 100,
+          includeExternalUrl: "0",
           contentRating: ["safe", "suggestive", "erotica", "pornographic"]
         })
         .catch(() => []) // 章节获取失败返回空数组
     ])
 
-    const estimatedPageCount = chapters[0].pages
+    // console.log(chapters)
+
+    const exactPageCount = chapters.reduce((total, chapter) => {
+      return total + (chapter.pages || 0)
+    }, 0)
 
     // 4. 构建响应数据（严格遵循格式）
-    const response = {
+    let response = {
       item_id: manga.id, // 漫画ID
       name: getPreferredTitle(manga.title), // 漫画名称
-      page_count: estimatedPageCount, // 漫画页数
+      page_count: exactPageCount, // 漫画页数
       rate: parseFloat(statistics.rating.bayesian.toFixed(2)), // 漫画评分
       cover: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverUrl}&width=256`, // 漫画封面
       tags: manga.tags ? manga.tags.map((tag) => tag.name.en) : "" // 漫画标签
+    }
+    if (chapters.length && chapters.length > 1) {
+      response.total_chapters = chapters.length
     }
 
     // 5. 发送响应
@@ -324,19 +332,22 @@ app.get("/comic/:id", async (req, res) => {
  *   ]
  * }
  */
-app.get("/photo/:id", async (req, res) => {
+app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
   try {
     const mangaId = req.params.id
+    const currentChapter = req.params.ch || 1
 
     // 1. 获取漫画基本信息
     const manga = await Manga.get(mangaId)
     const mangaTitle = getPreferredTitle(manga.title)
 
-    // 2. 获取第一章
+    // 2. 获取章节
     const chapters = await manga.getFeed({
       translatedLanguage: ["en"],
       order: { chapter: "asc" },
       limit: 1,
+      offset: currentChapter - 1,
+      includeExternalUrl: "0",
       contentRating: ["safe", "suggestive", "erotica", "pornographic"]
     })
 
@@ -346,7 +357,7 @@ app.get("/photo/:id", async (req, res) => {
         manga_id: mangaId
       })
     }
-
+    // console.log(chapters)
     // 3. 获取章节图片
     const chapter = chapters[0]
     const readablePages = await chapter.getReadablePages()
@@ -358,7 +369,7 @@ app.get("/photo/:id", async (req, res) => {
 
     // 5. 返回响应
     const response = {
-      title: mangaTitle,
+      title: chapter.title || mangaTitle,
       images: images
     }
 
