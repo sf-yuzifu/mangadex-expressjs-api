@@ -263,29 +263,52 @@ app.get("/comic/:id", async (req, res) => {
     const manga = await Manga.get(mangaId)
     const statistics = await manga.getStatistics()
 
-    // 2. 并行获取所需数据
-    const [coverUrl, chapters] = await Promise.all([
-      // 获取封面URL
-      getCoverImageUrl(manga.id, manga.mainCover?.id),
-      // 获取章节列表
-      manga
-        .getFeed({
+    // 2. 获取封面URL
+    const coverUrl = await getCoverImageUrl(manga.id, manga.mainCover?.id)
+
+    // 3. 获取所有章节（分页获取）
+    const allChapters = []
+    let offset = 0
+    const limit = 100 // 每次最多获取100章
+    let hasMore = true
+
+    while (hasMore) {
+      try {
+        const chaptersBatch = await manga.getFeed({
           translatedLanguage: ["en"],
           order: { chapter: "asc" },
-          limit: 100,
+          limit: limit,
+          offset: offset,
           includeExternalUrl: "0",
           contentRating: ["safe", "suggestive", "erotica", "pornographic"]
         })
-        .catch(() => []) // 章节获取失败返回空数组
-    ])
 
-    // console.log(chapters)
+        if (chaptersBatch.length === 0) {
+          hasMore = false
+        } else {
+          allChapters.push(...chaptersBatch)
+          offset += limit
 
-    const exactPageCount = chapters.reduce((total, chapter) => {
+          // 安全限制：最多获取2000章（防止无限循环）
+          if (allChapters.length >= 2000) {
+            console.warn(`漫画 ${mangaId} 章节数超过2000，已截断`)
+            hasMore = false
+          }
+        }
+      } catch (batchError) {
+        console.error(`获取章节批次失败 (offset: ${offset}):`, batchError.message)
+        hasMore = false
+      }
+    }
+
+    console.log(`漫画 ${mangaId} 总共获取到 ${allChapters.length} 章`)
+
+    // 4. 计算总页数
+    const exactPageCount = allChapters.reduce((total, chapter) => {
       return total + (chapter.pages || 0)
     }, 0)
 
-    // 4. 构建响应数据（严格遵循格式）
+    // 5. 构建响应数据（严格遵循格式）
     let response = {
       item_id: manga.id, // 漫画ID
       name: getPreferredTitle(manga.title), // 漫画名称
@@ -294,11 +317,11 @@ app.get("/comic/:id", async (req, res) => {
       cover: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverUrl}&width=256`, // 漫画封面
       tags: manga.tags ? manga.tags.map((tag) => tag.name.en) : "" // 漫画标签
     }
-    if (chapters.length && chapters.length > 1) {
-      response.total_chapters = chapters.length
+
+    if (allChapters.length > 0) {
+      response.total_chapters = allChapters.length
     }
 
-    // 5. 发送响应
     res.setHeader("Content-Type", "application/json")
     res.json(response)
   } catch (error) {
