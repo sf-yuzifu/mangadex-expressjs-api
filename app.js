@@ -1,13 +1,30 @@
 const express = require("express")
 const { Manga, Chapter } = require("mangadex-full-api")
 const app = express()
-const port = 3000
+const port = process.env.PORT || 3000
 
 const axios = require("axios")
 const sharp = require("sharp")
 
+process.on("uncaughtException", (error) => {
+  console.error("未捕获的异常:", error)
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("未处理的 Promise 拒绝:", reason)
+})
+
 // 解析 JSON 请求体
 app.use(express.json())
+
+// 设置请求超时
+app.use((req, res, next) => {
+  res.setTimeout(60000, () => {
+    console.log(`请求超时: ${req.method} ${req.url}`)
+    res.status(504).json({ error: "请求超时" })
+  })
+  next()
+})
 
 // 首页路由
 app.get("/", (req, res) => {
@@ -89,6 +106,15 @@ app.get("/config", (req, res) => {
 // 添加一个内存缓存来临时存储下一页数据
 const searchCache = new Map()
 const CACHE_TTL = 30000 // 30秒
+const MAX_CACHE_SIZE = 100 // 最大缓存条目数
+
+function addToCache(key, data) {
+  if (searchCache.size >= MAX_CACHE_SIZE) {
+    const oldestKey = searchCache.keys().next().value
+    searchCache.delete(oldestKey)
+  }
+  searchCache.set(key, { data, timestamp: Date.now() })
+}
 
 function getPreferredTitle(titleObj) {
   if (!titleObj || typeof titleObj !== "object") {
@@ -190,10 +216,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     }
 
     // 存入缓存
-    searchCache.set(cacheKey, {
-      data: response,
-      timestamp: Date.now()
-    })
+    addToCache(cacheKey, response)
 
     // 清理过期缓存
     setTimeout(() => {
@@ -427,7 +450,24 @@ app.use((req, res) => {
 })
 
 // 启动服务器
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`MangaDex API 服务运行在 http://localhost:${port}`)
   console.log(`配置地址: http://localhost:${port}/config`)
 })
+
+// 优雅关闭
+const gracefulShutdown = (signal) => {
+  console.log(`收到 ${signal} 信号，开始优雅关闭...`)
+  server.close(() => {
+    console.log("HTTP 服务器已关闭")
+    process.exit(0)
+  })
+
+  setTimeout(() => {
+    console.error("强制关闭超时，退出进程")
+    process.exit(1)
+  }, 10000)
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
+process.on("SIGINT", () => gracefulShutdown("SIGINT"))
