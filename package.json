@@ -4,7 +4,14 @@
   "private": true,
   "scripts": {
     "start": "node app.js",
-    "dev": "nodemon app.js"
+    "dev": "nodemon app.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop mangadex-api",
+    "pm2:restart": "pm2 restart mangadex-api",
+    "pm2:delete": "pm2 delete mangadex-api",
+    "pm2:logs": "pm2 logs mangadex-api",
+    "pm2:monit": "pm2 monit",
+    "pm2:status": "pm2 status"
   },
   "dependencies": {
     "axios": "^1.13.2",
