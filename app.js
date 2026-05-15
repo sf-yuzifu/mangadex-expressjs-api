@@ -424,11 +424,30 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
       `[搜索请求 ${requestId}] MangaDex API 查询完成 - 耗时: ${searchTime}ms, 结果数: ${currentPageResults.length}`
     )
 
-    // 处理当前页漫画的封面
-    console.log(`[搜索请求 ${requestId}] 开始获取封面图片...`)
+    // 处理当前页漫画的封面，同时检查是否有非外部章节
+    console.log(`[搜索请求 ${requestId}] 开始获取封面和章节检查...`)
     const coverStart = Date.now()
-    const results = await Promise.all(
+    const mappedResults = await Promise.all(
       currentPageResults.map(async (manga) => {
+        try {
+          const chapters = await manga.getFeed({
+            translatedLanguage: ["en"],
+            limit: 1,
+            includeExternalUrl: "0",
+            contentRating: ["safe", "suggestive", "erotica", "pornographic"]
+          })
+
+          if (chapters.length === 0) {
+            console.log(`[搜索请求 ${requestId}] 跳过无直接阅读章节的漫画: ${manga.id}`)
+            return null
+          }
+        } catch (feedErr) {
+          console.warn(
+            `[搜索请求 ${requestId}] 获取漫画 ${manga.id} 章节失败, 跳过: ${feedErr.message}`
+          )
+          return null
+        }
+
         const preferredTitle = getPreferredTitle(manga.title)
         await manga.mainCover.resolve()
 
@@ -455,9 +474,13 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
         }
       })
     )
+
+    const results = mappedResults.filter(Boolean)
     const coverTime = Date.now() - coverStart
 
-    console.log(`[搜索请求 ${requestId}] 封面获取完成 - 耗时: ${coverTime}ms`)
+    console.log(
+      `[搜索请求 ${requestId}] 封面获取完成 - 耗时: ${coverTime}ms, 过滤后结果数: ${results.length}/${mappedResults.length}`
+    )
 
     // 判断是否有下一页
     const hasMore = nextPageCheck.length > 0
