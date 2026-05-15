@@ -5,6 +5,7 @@ const port = process.env.PORT || 3000
 
 const axios = require("axios")
 const sharp = require("sharp")
+const zlib = require("zlib")
 
 process.on("uncaughtException", (error) => {
   console.error("=== 未捕获的异常 ===")
@@ -32,7 +33,7 @@ const imageRequestQueue = []
 async function processImageRequest(req, res) {
   const startTime = Date.now()
   const requestId = Math.random().toString(36).substring(7)
-  const queueIndex = imageRequestQueue.findIndex(item => item.req === req)
+  const queueIndex = imageRequestQueue.findIndex((item) => item.req === req)
   if (queueIndex !== -1) {
     imageRequestQueue.splice(queueIndex, 1)
   }
@@ -41,7 +42,7 @@ async function processImageRequest(req, res) {
 
   try {
     activeImageRequests++
-    
+
     const imageUrl = req.query.url
     if (!imageUrl) {
       console.log(`[图片请求 ${requestId}] 失败 - 缺少url参数`)
@@ -62,7 +63,9 @@ async function processImageRequest(req, res) {
     })
     const downloadTime = Date.now() - downloadStart
 
-    console.log(`[图片请求 ${requestId}] 下载完成 - 耗时: ${downloadTime}ms, 大小: ${(response.data.byteLength / 1024).toFixed(2)}KB`)
+    console.log(
+      `[图片请求 ${requestId}] 下载完成 - 耗时: ${downloadTime}ms, 大小: ${(response.data.byteLength / 1024).toFixed(2)}KB`
+    )
 
     if (response.status !== 200) {
       console.log(`[图片请求 ${requestId}] 失败 - HTTP状态码: ${response.status}`)
@@ -71,42 +74,79 @@ async function processImageRequest(req, res) {
 
     const contentLength = response.data.byteLength
     if (contentLength > 50 * 1024 * 1024) {
-      console.log(`[图片请求 ${requestId}] 失败 - 图片过大: ${(contentLength / 1024 / 1024).toFixed(2)}MB`)
+      console.log(
+        `[图片请求 ${requestId}] 失败 - 图片过大: ${(contentLength / 1024 / 1024).toFixed(2)}MB`
+      )
       return res.status(413).json({ error: "图片过大，最大支持 50MB" })
     }
 
     console.log(`[图片请求 ${requestId}] 开始处理图片...`)
     const processStart = Date.now()
-    
-    let sharpInstance = sharp(response.data, {
-      limitInputPixels: 268402689
-    })
-    
-    const imageBuffer = await sharpInstance
-      .resize({
-        width: targetWidth,
-        height: null,
-        fit: sharp.fit.inside,
-        withoutEnlargement: true
+
+    const iflvgl = req.query.ifLVGL
+
+    if (iflvgl === "1" || iflvgl === "true" || iflvgl === "True") {
+      const pngBuffer = await sharp(response.data, {
+        limitInputPixels: 268402689
       })
-      .jpeg({ 
-        quality: quality,
-        progressive: true,
-        mozjpeg: true
+        .resize({
+          width: targetWidth,
+          height: null,
+          fit: sharp.fit.inside,
+          withoutEnlargement: true
+        })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .png({ palette: true, colours: 256, dither: 1.0 })
+        .toBuffer()
+
+      const { palette, indexedData, width, height } = parsePNGForLVGL(pngBuffer)
+      const lvgl8Buffer = buildLVGL8Binary(width, height, palette, indexedData)
+
+      const processTime = Date.now() - processStart
+
+      console.log(
+        `[图片请求 ${requestId}] LVGL8转换完成 - 耗时: ${processTime}ms, 输出大小: ${(lvgl8Buffer.length / 1024).toFixed(2)}KB, 尺寸: ${width}x${height}`
+      )
+
+      res.set({
+        "Content-Type": "application/octet-stream",
+        "Cache-Control": "public, max-age=86400"
       })
-      .toBuffer()
-    const processTime = Date.now() - processStart
 
-    sharpInstance = null
+      res.send(lvgl8Buffer)
+    } else {
+      let sharpInstance = sharp(response.data, {
+        limitInputPixels: 268402689
+      })
 
-    console.log(`[图片请求 ${requestId}] 图片处理完成 - 耗时: ${processTime}ms, 输出大小: ${(imageBuffer.length / 1024).toFixed(2)}KB`)
+      const imageBuffer = await sharpInstance
+        .resize({
+          width: targetWidth,
+          height: null,
+          fit: sharp.fit.inside,
+          withoutEnlargement: true
+        })
+        .jpeg({
+          quality: quality,
+          progressive: true,
+          mozjpeg: true
+        })
+        .toBuffer()
+      const processTime = Date.now() - processStart
 
-    res.set({
-      "Content-Type": "image/jpeg",
-      "Cache-Control": "public, max-age=86400"
-    })
+      sharpInstance = null
 
-    res.send(imageBuffer)
+      console.log(
+        `[图片请求 ${requestId}] 图片处理完成 - 耗时: ${processTime}ms, 输出大小: ${(imageBuffer.length / 1024).toFixed(2)}KB`
+      )
+
+      res.set({
+        "Content-Type": "image/jpeg",
+        "Cache-Control": "public, max-age=86400"
+      })
+
+      res.send(imageBuffer)
+    }
 
     const totalTime = Date.now() - startTime
     console.log(`[图片请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms`)
@@ -133,7 +173,9 @@ async function processImageRequest(req, res) {
     res.status(500).json({ error: `图片处理失败: ${error.message}` })
   } finally {
     activeImageRequests--
-    console.log(`[图片请求 ${requestId}] 结束 - 活跃请求: ${activeImageRequests}, 队列长度: ${imageRequestQueue.length}`)
+    console.log(
+      `[图片请求 ${requestId}] 结束 - 活跃请求: ${activeImageRequests}, 队列长度: ${imageRequestQueue.length}`
+    )
     processNextImageRequest()
   }
 }
@@ -143,6 +185,104 @@ function processNextImageRequest() {
     const nextRequest = imageRequestQueue.shift()
     processImageRequest(nextRequest.req, nextRequest.res)
   }
+}
+
+function parsePNGForLVGL(pngBuffer) {
+  let offset = 8
+  let width, height
+  let palette = []
+  const idatChunks = []
+
+  while (offset < pngBuffer.length) {
+    const length = pngBuffer.readUInt32BE(offset)
+    const type = pngBuffer.slice(offset + 4, offset + 8).toString("ascii")
+    const data = pngBuffer.slice(offset + 8, offset + 8 + length)
+
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0)
+      height = data.readUInt32BE(4)
+    } else if (type === "PLTE") {
+      for (let i = 0; i < data.length; i += 3) {
+        palette.push([data[i], data[i + 1], data[i + 2]])
+      }
+    } else if (type === "IDAT") {
+      idatChunks.push(data)
+    } else if (type === "IEND") {
+      break
+    }
+
+    offset += 12 + length
+  }
+
+  while (palette.length < 256) {
+    palette.push([0, 0, 0])
+  }
+
+  const compressed = Buffer.concat(idatChunks)
+  const decompressed = zlib.inflateSync(compressed)
+
+  const stride = width
+  const rawIndexed = Buffer.alloc(height * stride)
+
+  for (let y = 0; y < height; y++) {
+    const filterType = decompressed[y * (stride + 1)]
+    const srcStart = y * (stride + 1) + 1
+    const dstStart = y * stride
+
+    for (let x = 0; x < stride; x++) {
+      let val = decompressed[srcStart + x]
+
+      if (filterType === 1) {
+        const a = x >= 1 ? rawIndexed[dstStart + x - 1] : 0
+        val = (val + a) & 0xff
+      } else if (filterType === 2) {
+        const b = y > 0 ? rawIndexed[dstStart - stride + x] : 0
+        val = (val + b) & 0xff
+      } else if (filterType === 3) {
+        const a = x >= 1 ? rawIndexed[dstStart + x - 1] : 0
+        const b = y > 0 ? rawIndexed[dstStart - stride + x] : 0
+        val = (val + Math.floor((a + b) / 2)) & 0xff
+      } else if (filterType === 4) {
+        const a = x >= 1 ? rawIndexed[dstStart + x - 1] : 0
+        const b = y > 0 ? rawIndexed[dstStart - stride + x] : 0
+        const c = y > 0 && x >= 1 ? rawIndexed[dstStart - stride + x - 1] : 0
+        const p = a + b - c
+        const pa = Math.abs(p - a)
+        const pb = Math.abs(p - b)
+        const pc = Math.abs(p - c)
+        if (pa <= pb && pa <= pc) val = (val + a) & 0xff
+        else if (pb <= pc) val = (val + b) & 0xff
+        else val = (val + c) & 0xff
+      }
+
+      rawIndexed[dstStart + x] = val
+    }
+  }
+
+  return { width, height, palette, indexedData: rawIndexed }
+}
+
+function buildLVGL8Binary(width, height, palette, indexedData) {
+  const cf = 10
+  const alwaysZero = 0
+  const reserved = 0
+  const headerWord = cf | (alwaysZero << 5) | (reserved << 8) | (width << 10) | (height << 21)
+
+  const output = Buffer.alloc(4 + 256 * 4 + height * width)
+
+  output.writeUInt32LE(headerWord, 0)
+
+  for (let i = 0; i < 256; i++) {
+    const [r, g, b] = palette[i]
+    output[4 + i * 4] = b
+    output[4 + i * 4 + 1] = g
+    output[4 + i * 4 + 2] = r
+    output[4 + i * 4 + 3] = 0xff
+  }
+
+  indexedData.copy(output, 4 + 256 * 4)
+
+  return output
 }
 
 // 解析 JSON 请求体
@@ -234,7 +374,7 @@ function getPreferredTitle(titleObj) {
 app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
   const startTime = Date.now()
   const requestId = Math.random().toString(36).substring(7)
-  
+
   try {
     const searchText = req.params.text
     const currentPage = parseInt(req.params.page) || 1
@@ -280,7 +420,9 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     ])
     const searchTime = Date.now() - searchStart
 
-    console.log(`[搜索请求 ${requestId}] MangaDex API 查询完成 - 耗时: ${searchTime}ms, 结果数: ${currentPageResults.length}`)
+    console.log(
+      `[搜索请求 ${requestId}] MangaDex API 查询完成 - 耗时: ${searchTime}ms, 结果数: ${currentPageResults.length}`
+    )
 
     // 处理当前页漫画的封面
     console.log(`[搜索请求 ${requestId}] 开始获取封面图片...`)
@@ -300,7 +442,10 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
             const fileName = coverResponse.data.data.attributes.fileName
             coverImageUrl = `https://uploads.mangadex.org/covers/${manga.id}/${fileName}.256.jpg`
           } catch (coverErr) {
-            console.error(`[搜索请求 ${requestId}] 获取封面 ${manga.mainCover.id} 失败:`, coverErr.message)
+            console.error(
+              `[搜索请求 ${requestId}] 获取封面 ${manga.mainCover.id} 失败:`,
+              coverErr.message
+            )
           }
         }
         return {
@@ -333,7 +478,9 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     }, CACHE_TTL)
 
     const totalTime = Date.now() - startTime
-    console.log(`[搜索请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms, 结果数: ${results.length}, 下一页: ${hasMore}`)
+    console.log(
+      `[搜索请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms, 结果数: ${results.length}, 下一页: ${hasMore}`
+    )
 
     res.setHeader("Content-Type", "application/json")
     res.json(response)
@@ -388,7 +535,7 @@ async function getCoverImageUrl(mangaId, coverId) {
 app.get("/comic/:id", async (req, res) => {
   const startTime = Date.now()
   const requestId = Math.random().toString(36).substring(7)
-  
+
   try {
     const mangaId = req.params.id
 
@@ -425,7 +572,7 @@ app.get("/comic/:id", async (req, res) => {
       try {
         batchCount++
         console.log(`[漫画详情请求 ${requestId}] 获取章节批次 ${batchCount} (offset: ${offset})...`)
-        
+
         const chaptersBatch = await manga.getFeed({
           translatedLanguage: ["en"],
           order: { chapter: "asc" },
@@ -440,7 +587,9 @@ app.get("/comic/:id", async (req, res) => {
         } else {
           allChapters.push(...chaptersBatch)
           offset += limit
-          console.log(`[漫画详情请求 ${requestId}] 批次 ${batchCount} 完成 - 获取 ${chaptersBatch.length} 章, 总计 ${allChapters.length} 章`)
+          console.log(
+            `[漫画详情请求 ${requestId}] 批次 ${batchCount} 完成 - 获取 ${chaptersBatch.length} 章, 总计 ${allChapters.length} 章`
+          )
 
           if (allChapters.length >= 2000) {
             console.warn(`[漫画详情请求 ${requestId}] 章节数超过2000，已截断`)
@@ -448,12 +597,17 @@ app.get("/comic/:id", async (req, res) => {
           }
         }
       } catch (batchError) {
-        console.error(`[漫画详情请求 ${requestId}] 获取章节批次失败 (offset: ${offset}):`, batchError.message)
+        console.error(
+          `[漫画详情请求 ${requestId}] 获取章节批次失败 (offset: ${offset}):`,
+          batchError.message
+        )
         hasMore = false
       }
     }
 
-    console.log(`[漫画详情请求 ${requestId}] 章节获取完成 - 总章节数: ${allChapters.length}, 批次数: ${batchCount}`)
+    console.log(
+      `[漫画详情请求 ${requestId}] 章节获取完成 - 总章节数: ${allChapters.length}, 批次数: ${batchCount}`
+    )
 
     // 4. 计算总页数
     const exactPageCount = allChapters.reduce((total, chapter) => {
@@ -519,7 +673,7 @@ app.get("/comic/:id", async (req, res) => {
 app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
   const startTime = Date.now()
   const requestId = Math.random().toString(36).substring(7)
-  
+
   try {
     const mangaId = req.params.id
     const currentChapter = req.params.ch || 1
@@ -572,7 +726,9 @@ app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
     }
 
     const totalTime = Date.now() - startTime
-    console.log(`[漫画图片请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms, 图片数量: ${images.length}`)
+    console.log(
+      `[漫画图片请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms, 图片数量: ${images.length}`
+    )
 
     res.setHeader("Content-Type", "application/json")
     res.json(response)
@@ -622,7 +778,7 @@ const server = app.listen(port, () => {
   console.log("========================================")
   console.log(`服务地址: http://localhost:${port}`)
   console.log(`配置地址: http://localhost:${port}/config`)
-  console.log(`环境: ${process.env.NODE_ENV || 'development'}`)
+  console.log(`环境: ${process.env.NODE_ENV || "development"}`)
   console.log(`启动时间: ${new Date().toISOString()}`)
   console.log("========================================")
 })
@@ -636,7 +792,7 @@ const gracefulShutdown = (signal) => {
   console.log(`当前队列长度: ${imageRequestQueue.length}`)
   console.log(`当前缓存大小: ${searchCache.size}`)
   console.log("========================================")
-  
+
   server.close(() => {
     console.log("HTTP 服务器已关闭")
     process.exit(0)
