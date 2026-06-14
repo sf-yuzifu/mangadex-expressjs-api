@@ -41,7 +41,7 @@ node app.js
     "detailPath": "/comic/<id>",
     "photoPath": "/photo/<id>/ch/<chapter>",
     "searchPath": "/search/<text>/<page>",
-    "type": "mangedex"
+    "type": "mangadex"
   }
 }
 ```
@@ -78,7 +78,7 @@ node app.js
   "page_count": 500,
   "rate": 8.5,
   "cover": "https://your-domain.com/image/proxy?url=...&width=256",
-  "tags": "标签1, 标签2",
+  "tags": ["标签1", "标签2"],
   "total_chapters": 50
 }
 ```
@@ -103,9 +103,12 @@ node app.js
 - **路径**: `GET /image/proxy`
 - **查询参数**:
     - `url`: 原始图片URL（必需）
-    - `width`: 目标宽度（默认600）
-    - `quality`: JPEG质量（默认50）
-- **描述**: 下载、调整大小、压缩并返回优化后的图片
+    - `width`: 目标宽度（默认600，封面通常由快应用传80）
+    - `quality`: 图片质量（默认50）
+    - `ifPNG`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 PNG
+    - `ifLVGL`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 LVGL 预解码二进制
+- **返回优先级**: `ifLVGL > ifPNG > JPEG`
+- **描述**: 下载、调整大小、压缩并返回适合 Vela 快应用使用的图片或二进制数据
 
 ## 🔧 配置说明
 
@@ -161,10 +164,12 @@ server {
 ### 2. PM2 进程管理
 ```bash
 npm install -g pm2
-pm2 start app.js --name "mangadex-api"
+npm run pm2:start
 pm2 save
 pm2 startup
 ```
+
+项目内置的 `ecosystem.config.js` 会启用自动重启、内存限制和每日定时重启。
 
 ### 3. Docker 部署
 ```dockerfile
