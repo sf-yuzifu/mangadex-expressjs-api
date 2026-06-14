@@ -14,6 +14,7 @@ process.on("uncaughtException", (error) => {
   console.error("错误信息:", error.message)
   console.error("错误堆栈:", error.stack)
   console.error("====================")
+  process.exit(1)
 })
 
 process.on("unhandledRejection", (reason, promise) => {
@@ -22,7 +23,36 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("拒绝原因:", reason)
   console.error("Promise:", promise)
   console.error("============================")
+  process.exit(1)
 })
+
+function isTruthy(value) {
+  return ["1", "true", "True", "yes", "on"].includes(String(value))
+}
+
+function getApiUrl(req) {
+  return `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`
+}
+
+function buildProxyUrl(req, imageUrl, extraParams = {}) {
+  const params = new URLSearchParams()
+  params.set("url", imageUrl || "")
+
+  Object.entries(extraParams).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      params.set(key, String(value))
+    }
+  })
+
+  return `${getApiUrl(req)}/image/proxy?${params.toString()}`
+}
+
+function sendJson(res, statusCode, data) {
+  if (res.headersSent || res.writableEnded) {
+    return
+  }
+  res.status(statusCode).json(data)
+}
 
 // 图片处理并发限制
 const MAX_CONCURRENT_IMAGE_REQUESTS = 5
@@ -46,7 +76,7 @@ async function processImageRequest(req, res) {
     const imageUrl = req.query.url
     if (!imageUrl) {
       console.log(`[图片请求 ${requestId}] 失败 - 缺少url参数`)
-      return res.status(400).json({ error: "缺少url参数" })
+      return sendJson(res, 400, { error: "缺少url参数" })
     }
 
     const targetWidth = parseInt(req.query.width) || 600
@@ -69,7 +99,7 @@ async function processImageRequest(req, res) {
 
     if (response.status !== 200) {
       console.log(`[图片请求 ${requestId}] 失败 - HTTP状态码: ${response.status}`)
-      return res.status(500).json({ error: `图片下载失败: ${response.status}` })
+      return sendJson(res, 500, { error: `图片下载失败: ${response.status}` })
     }
 
     const contentLength = response.data.byteLength
@@ -77,7 +107,7 @@ async function processImageRequest(req, res) {
       console.log(
         `[图片请求 ${requestId}] 失败 - 图片过大: ${(contentLength / 1024 / 1024).toFixed(2)}MB`
       )
-      return res.status(413).json({ error: "图片过大，最大支持 50MB" })
+      return sendJson(res, 413, { error: "图片过大，最大支持 50MB" })
     }
 
     console.log(`[图片请求 ${requestId}] 开始处理图片...`)
@@ -85,7 +115,7 @@ async function processImageRequest(req, res) {
 
     const iflvgl = req.query.ifLVGL
 
-    if (iflvgl === "1" || iflvgl === "true" || iflvgl === "True") {
+    if (isTruthy(iflvgl)) {
       const pngBuffer = await sharp(response.data, {
         limitInputPixels: 268402689
       })
@@ -117,21 +147,37 @@ async function processImageRequest(req, res) {
     } else {
       let sharpInstance = sharp(response.data, {
         limitInputPixels: 268402689
+      }).resize({
+        width: targetWidth,
+        height: null,
+        fit: sharp.fit.inside,
+        withoutEnlargement: true
       })
 
-      const imageBuffer = await sharpInstance
-        .resize({
-          width: targetWidth,
-          height: null,
-          fit: sharp.fit.inside,
-          withoutEnlargement: true
-        })
-        .jpeg({
-          quality: quality,
-          progressive: true,
-          mozjpeg: true
-        })
-        .toBuffer()
+      let imageBuffer
+      let contentType
+
+      if (isTruthy(req.query.ifPNG)) {
+        imageBuffer = await sharpInstance
+          .flatten({ background: { r: 255, g: 255, b: 255 } })
+          .png({
+            quality: quality,
+            compressionLevel: 9,
+            palette: quality < 95
+          })
+          .toBuffer()
+        contentType = "image/png"
+      } else {
+        imageBuffer = await sharpInstance
+          .jpeg({
+            quality: quality,
+            progressive: true,
+            mozjpeg: true
+          })
+          .toBuffer()
+        contentType = "image/jpeg"
+      }
+
       const processTime = Date.now() - processStart
 
       sharpInstance = null
@@ -141,7 +187,7 @@ async function processImageRequest(req, res) {
       )
 
       res.set({
-        "Content-Type": "image/jpeg",
+        "Content-Type": contentType,
         "Cache-Control": "public, max-age=86400"
       })
 
@@ -160,17 +206,17 @@ async function processImageRequest(req, res) {
 
     if (error.response) {
       console.error(`[图片请求 ${requestId}] HTTP响应状态: ${error.response.status}`)
-      return res.status(error.response.status).json({
+      return sendJson(res, error.response.status, {
         error: `图片下载失败: ${error.response.status}`
       })
     }
 
     if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
       console.error(`[图片请求 ${requestId}] 请求超时`)
-      return res.status(504).json({ error: "请求超时" })
+      return sendJson(res, 504, { error: "请求超时" })
     }
 
-    res.status(500).json({ error: `图片处理失败: ${error.message}` })
+    sendJson(res, 500, { error: `图片处理失败: ${error.message}` })
   } finally {
     activeImageRequests--
     console.log(
@@ -292,7 +338,7 @@ app.use(express.json())
 app.use((req, res, next) => {
   res.setTimeout(60000, () => {
     console.log(`请求超时: ${req.method} ${req.url}`)
-    res.status(504).json({ error: "请求超时" })
+    sendJson(res, 504, { error: "请求超时" })
   })
   next()
 })
@@ -308,13 +354,20 @@ app.get("/", (req, res) => {
  */
 app.get("/image/proxy", (req, res) => {
   if (imageRequestQueue.length >= MAX_QUEUE_SIZE) {
-    return res.status(429).json({ error: "请求过多，请稍后再试" })
+    return sendJson(res, 429, { error: "请求过多，请稍后再试" })
   }
 
   if (activeImageRequests < MAX_CONCURRENT_IMAGE_REQUESTS) {
     processImageRequest(req, res)
   } else {
-    imageRequestQueue.push({ req, res })
+    const queuedRequest = { req, res }
+    imageRequestQueue.push(queuedRequest)
+    req.on("close", () => {
+      const queueIndex = imageRequestQueue.indexOf(queuedRequest)
+      if (queueIndex !== -1) {
+        imageRequestQueue.splice(queueIndex, 1)
+      }
+    })
     console.log(`图片请求已排队，当前队列长度: ${imageRequestQueue.length}`)
   }
 })
@@ -324,11 +377,11 @@ app.get("/config", (req, res) => {
   const config = {
     MangaDex: {
       name: "MangaDex",
-      apiUrl: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`,
+      apiUrl: getApiUrl(req),
       detailPath: "/comic/<id>",
       photoPath: "/photo/<id>/ch/<chapter>",
       searchPath: "/search/<text>/<page>",
-      type: "mangedex"
+      type: "mangadex"
     }
   }
   res.setHeader("Content-Type", "application/json")
@@ -391,7 +444,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
       const cacheAge = Date.now() - cached.timestamp
       console.log(`[搜索请求 ${requestId}] 使用缓存 - 缓存年龄: ${cacheAge}ms`)
       res.setHeader("Content-Type", "application/json")
-      return res.json(cached.data)
+      return sendJson(res, 200, cached.data)
     }
 
     console.log(`[搜索请求 ${requestId}] 缓存未命中，开始查询 MangaDex API...`)
@@ -449,17 +502,19 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
         }
 
         const preferredTitle = getPreferredTitle(manga.title)
-        await manga.mainCover.resolve()
+        let coverImageUrl = "https://via.placeholder.com/400x600/333/ccc?text=No+Cover"
 
-        let coverImageUrl
-        if (manga.mainCover && manga.mainCover.id) {
+        if (manga.mainCover) {
           try {
-            const coverResponse = await axios.get(
-              `https://api.mangadex.org/cover/${manga.mainCover.id}`,
-              { timeout: 5000 }
-            )
-            const fileName = coverResponse.data.data.attributes.fileName
-            coverImageUrl = `https://uploads.mangadex.org/covers/${manga.id}/${fileName}.256.jpg`
+            await manga.mainCover.resolve()
+            if (manga.mainCover.id) {
+              const coverResponse = await axios.get(
+                `https://api.mangadex.org/cover/${manga.mainCover.id}`,
+                { timeout: 5000 }
+              )
+              const fileName = coverResponse.data.data.attributes.fileName
+              coverImageUrl = `https://uploads.mangadex.org/covers/${manga.id}/${fileName}.256.jpg`
+            }
           } catch (coverErr) {
             console.error(
               `[搜索请求 ${requestId}] 获取封面 ${manga.mainCover.id} 失败:`,
@@ -470,7 +525,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
         return {
           comic_id: manga.id,
           title: preferredTitle,
-          cover_url: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverImageUrl}&width=100`
+          cover_url: buildProxyUrl(req, coverImageUrl, { width: 100 })
         }
       })
     )
@@ -506,7 +561,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     )
 
     res.setHeader("Content-Type", "application/json")
-    res.json(response)
+    sendJson(res, 200, response)
   } catch (error) {
     const totalTime = Date.now() - startTime
     console.error(`[搜索请求 ${requestId}] 失败 - 耗时: ${totalTime}ms`)
@@ -514,7 +569,7 @@ app.get(["/search/:text", "/search/:text/:page"], async (req, res) => {
     console.error(`[搜索请求 ${requestId}] 错误信息: ${error.message}`)
     console.error(`[搜索请求 ${requestId}] 错误代码: ${error.code}`)
     console.error(`[搜索请求 ${requestId}] 错误堆栈: ${error.stack}`)
-    res.status(500).json({ error: "搜索失败" })
+    sendJson(res, 500, { error: "搜索失败" })
   }
 })
 
@@ -567,7 +622,7 @@ app.get("/comic/:id", async (req, res) => {
     // 验证ID格式（MangaDex UUID格式）
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(mangaId)) {
       console.log(`[漫画详情请求 ${requestId}] 失败 - 无效的UUID格式`)
-      return res.status(400).json({
+      return sendJson(res, 400, {
         error: "无效的漫画ID格式",
         expected_format: "UUID格式，例如: 32d76d19-8a05-4db0-9fc2-e0b0648fe9d0"
       })
@@ -645,8 +700,8 @@ app.get("/comic/:id", async (req, res) => {
       name: getPreferredTitle(manga.title),
       page_count: exactPageCount,
       rate: parseFloat(statistics.rating.bayesian.toFixed(2)),
-      cover: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${coverUrl}&width=256`,
-      tags: manga.tags ? manga.tags.map((tag) => tag.name.en) : ""
+      cover: buildProxyUrl(req, coverUrl, { width: 256 }),
+      tags: manga.tags ? manga.tags.map((tag) => tag.name.en) : []
     }
 
     if (allChapters.length > 0) {
@@ -657,7 +712,7 @@ app.get("/comic/:id", async (req, res) => {
     console.log(`[漫画详情请求 ${requestId}] 成功完成 - 总耗时: ${totalTime}ms`)
 
     res.setHeader("Content-Type", "application/json")
-    res.json(response)
+    sendJson(res, 200, response)
   } catch (error) {
     const totalTime = Date.now() - startTime
     console.error(`[漫画详情请求 ${requestId}] 失败 - 耗时: ${totalTime}ms`)
@@ -667,13 +722,13 @@ app.get("/comic/:id", async (req, res) => {
     console.error(`[漫画详情请求 ${requestId}] 错误堆栈: ${error.stack}`)
 
     if (error.message.includes("not found") || error.message.includes("不存在")) {
-      return res.status(404).json({
+      return sendJson(res, 404, {
         error: "漫画不存在",
         manga_id: req.params.id
       })
     }
 
-    res.status(500).json({
+    sendJson(res, 500, {
       error: "获取漫画详情失败",
       manga_id: req.params.id,
       message: error.message
@@ -722,7 +777,7 @@ app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
 
     if (chapters.length === 0) {
       console.log(`[漫画图片请求 ${requestId}] 失败 - 未找到章节 ${currentChapter}`)
-      return res.status(404).json({
+      return sendJson(res, 404, {
         error: "未找到章节",
         manga_id: mangaId
       })
@@ -739,7 +794,7 @@ app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
 
     // 4. 构建图片URL数组
     const images = readablePages.map((url) => ({
-      url: `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}/image/proxy?url=${url}`
+      url: buildProxyUrl(req, url)
     }))
 
     // 5. 返回响应
@@ -754,7 +809,7 @@ app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
     )
 
     res.setHeader("Content-Type", "application/json")
-    res.json(response)
+    sendJson(res, 200, response)
   } catch (error) {
     const totalTime = Date.now() - startTime
     console.error(`[漫画图片请求 ${requestId}] 失败 - 耗时: ${totalTime}ms`)
@@ -764,13 +819,13 @@ app.get(["/photo/:id", "/photo/:id/ch/:ch"], async (req, res) => {
     console.error(`[漫画图片请求 ${requestId}] 错误堆栈: ${error.stack}`)
 
     if (error.message.includes("not found") || error.message.includes("不存在")) {
-      return res.status(404).json({
+      return sendJson(res, 404, {
         error: "漫画不存在",
         manga_id: req.params.id
       })
     }
 
-    res.status(500).json({
+    sendJson(res, 500, {
       error: "获取漫画图片失败",
       manga_id: req.params.id
     })
@@ -785,13 +840,13 @@ app.use((err, req, res, next) => {
   console.error(`[错误处理 ${requestId}] 错误名称: ${err.name}`)
   console.error(`[错误处理 ${requestId}] 错误信息: ${err.message}`)
   console.error(`[错误处理 ${requestId}] 错误堆栈: ${err.stack}`)
-  res.status(500).json({ error: "服务器内部错误" })
+  sendJson(res, 500, { error: "服务器内部错误" })
 })
 
 // 404 处理
 app.use((req, res) => {
   console.log(`[404] 路由未找到 - ${req.method} ${req.url}`)
-  res.status(404).json({ error: "路由未找到" })
+  sendJson(res, 404, { error: "路由未找到" })
 })
 
 // 启动服务器

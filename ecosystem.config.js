@@ -24,7 +24,6 @@ module.exports = {
     max_restarts: 10,
     restart_delay: 4000,
     kill_timeout: 5000,
-    wait_ready: true,
     listen_timeout: 10000,
     exp_backoff_restart_delay: 100,
     autorestart: true,
